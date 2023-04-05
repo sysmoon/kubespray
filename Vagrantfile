@@ -10,6 +10,7 @@ Vagrant.require_version ">= 2.0.0"
 CONFIG = File.join(File.dirname(__FILE__), ENV['KUBESPRAY_VAGRANT_CONFIG'] || 'vagrant/config.rb')
 
 FLATCAR_URL_TEMPLATE = "https://%s.release.flatcar-linux.net/amd64-usr/current/flatcar_production_vagrant.json"
+FEDORA35_MIRROR = "https://download.fedoraproject.org/pub/fedora/linux/releases/35/Cloud/x86_64/images/Fedora-Cloud-Base-Vagrant-35-1.2.x86_64.vagrant-libvirt.box"
 
 # Uniq disk UUID for libvirt
 DISK_UUID = Time.now.utc.to_i
@@ -26,9 +27,12 @@ SUPPORTED_OS = {
   "centos-bento"        => {box: "bento/centos-7.6",           user: "vagrant"},
   "centos8"             => {box: "centos/8",                   user: "vagrant"},
   "centos8-bento"       => {box: "bento/centos-8",             user: "vagrant"},
-  "fedora33"            => {box: "fedora/33-cloud-base",       user: "vagrant"},
-  "fedora34"            => {box: "fedora/34-cloud-base",       user: "vagrant"},
-  "opensuse"            => {box: "bento/opensuse-leap-15.2",   user: "vagrant"},
+  "almalinux8"          => {box: "almalinux/8",                user: "vagrant"},
+  "almalinux8-bento"    => {box: "bento/almalinux-8",          user: "vagrant"},
+  "rockylinux8"         => {box: "generic/rocky8",             user: "vagrant"},
+  "fedora35"            => {box: "fedora/35-cloud-base",       user: "vagrant", box_url: FEDORA35_MIRROR},
+  "fedora36"            => {box: "fedora/36-cloud-base",       user: "vagrant"},
+  "opensuse"            => {box: "opensuse/Leap-15.4.x86_64",  user: "vagrant"},
   "opensuse-tumbleweed" => {box: "opensuse/Tumbleweed.x86_64", user: "vagrant"},
   "oraclelinux"         => {box: "generic/oracle7",            user: "vagrant"},
   "oraclelinux8"        => {box: "generic/oracle8",            user: "vagrant"},
@@ -52,10 +56,10 @@ $subnet ||= "172.18.8"
 $subnet_ipv6 ||= "fd3c:b398:0698:0756"
 $os ||= "ubuntu1804"
 $network_plugin ||= "flannel"
-# Setting multi_networking to true will install Multus: https://github.com/intel/multus-cni
-$multi_networking ||= false
+# Setting multi_networking to true will install Multus: https://github.com/k8snetworkplumbingwg/multus-cni
+$multi_networking ||= "False"
 $download_run_once ||= "True"
-$download_force_cache ||= "True"
+$download_force_cache ||= "False"
 # The first three nodes are etcd servers
 $etcd_instances ||= $num_instances
 # The first two nodes are kube masters
@@ -68,9 +72,12 @@ $kube_node_instances_with_disks_size ||= "20G"
 $kube_node_instances_with_disks_number ||= 2
 $override_disk_size ||= false
 $disk_size ||= "20GB"
-$local_path_provisioner_enabled ||= false
+$local_path_provisioner_enabled ||= "False"
 $local_path_provisioner_claim_root ||= "/opt/local-path-provisioner/"
 $libvirt_nested ||= false
+# boolean or string (e.g. "-vvv")
+$ansible_verbosity ||= false
+$ansible_tags ||= ENV['VAGRANT_ANSIBLE_TAGS'] || ""
 
 $playbook ||= "cluster.yml"
 
@@ -167,7 +174,7 @@ Vagrant.configure("2") do |config|
           # always make /dev/sd{a/b/c} so that CI can ensure that
           # virtualbox and libvirt will have the same devices to use for OSDs
           (1..$kube_node_instances_with_disks_number).each do |d|
-            lv.storage :file, :device => "hd#{driverletters[d]}", :path => "disk-#{i}-#{d}-#{DISK_UUID}.disk", :size => $kube_node_instances_with_disks_size, :bus => "ide"
+            lv.storage :file, :device => "hd#{driverletters[d]}", :path => "disk-#{i}-#{d}-#{DISK_UUID}.disk", :size => $kube_node_instances_with_disks_size, :bus => "scsi"
           end
         end
       end
@@ -238,9 +245,11 @@ Vagrant.configure("2") do |config|
       }
 
       # Only execute the Ansible provisioner once, when all the machines are up and ready.
+      # And limit the action to gathering facts, the full playbook is going to be ran by testcases_run.sh
       if i == $num_instances
         node.vm.provision "ansible" do |ansible|
           ansible.playbook = $playbook
+          ansible.verbose = $ansible_verbosity
           $ansible_inventory_path = File.join( $inventory, "hosts.ini")
           if File.exist?($ansible_inventory_path)
             ansible.inventory_path = $ansible_inventory_path
@@ -250,7 +259,9 @@ Vagrant.configure("2") do |config|
           ansible.host_key_checking = false
           ansible.raw_arguments = ["--forks=#{$num_instances}", "--flush-cache", "-e ansible_become_pass=vagrant"]
           ansible.host_vars = host_vars
-          #ansible.tags = ['download']
+          if $ansible_tags != ""
+            ansible.tags = [$ansible_tags]
+          end
           ansible.groups = {
             "etcd" => ["#{$instance_name_prefix}-[1:#{$etcd_instances}]"],
             "kube_control_plane" => ["#{$instance_name_prefix}-[1:#{$kube_master_instances}]"],
